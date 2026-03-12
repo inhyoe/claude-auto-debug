@@ -1,0 +1,11 @@
+[Unit]
+Description=Claude Auto-Debug Service
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/claude-auto-debug/config.env
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/claude-auto-debug/bin/auto-debug.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-auto-debug

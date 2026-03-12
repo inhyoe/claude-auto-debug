@@ -1,0 +1,10 @@
+[Unit]
+Description=Claude Auto-Debug Timer
+
+[Timer]
+OnUnitActiveSec=%%INTERVAL%%
+Persistent=true
+Unit=auto-debug.service
+
+[Install]
+WantedBy=timers.target

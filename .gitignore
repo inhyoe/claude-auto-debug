@@ -1,0 +1,4 @@
+*.log
+.claude/
+.ccb/
+__pycache__/

@@ -24,7 +24,8 @@ load_config() {
         case "$key" in
             PROJECT_DIR|VALIDATION_CMD|ALLOWED_TOOLS|MAX_FILES|\
             LOG_RETENTION_DAYS|INTERVAL|MAX_RECENT_COMMITS|\
-            LOG_DIR|DEAD_LETTER_DIR|STATE_FILE|PROMPT_TEMPLATE)
+            LOG_DIR|DEAD_LETTER_DIR|STATE_FILE|PROMPT_TEMPLATE|\
+            DEFAULT_BRANCH)
                 export "$key=$val"
                 ;;
         esac
@@ -106,6 +107,17 @@ cleanup() {
 # ---------------------------------------------------------------------------
 detect_default_branch() {
     cd "$PROJECT_DIR"
+
+    # If DEFAULT_BRANCH was set via config, use it directly
+    if [[ -n "${DEFAULT_BRANCH:-}" ]]; then
+        if [[ "$HAS_REMOTE" = true ]] && git rev-parse --verify "origin/$DEFAULT_BRANCH" &>/dev/null 2>&1; then
+            REMOTE_REF="origin/$DEFAULT_BRANCH"
+        else
+            REMOTE_REF="$DEFAULT_BRANCH"
+        fi
+        log "Using configured DEFAULT_BRANCH=$DEFAULT_BRANCH"
+        return
+    fi
 
     # Check if remote 'origin' exists
     if ! git remote get-url origin &>/dev/null; then
@@ -227,6 +239,16 @@ check_dedup() {
     # Fetch upstream and fast-forward local branch if possible
     if [[ "$HAS_REMOTE" = true ]]; then
         if git fetch origin "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null; then
+            # Ensure local DEFAULT_BRANCH ref exists (may only have remote-tracking ref)
+            if ! git rev-parse --verify "refs/heads/$DEFAULT_BRANCH" &>/dev/null; then
+                local remote_head
+                remote_head=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
+                if [[ -n "$remote_head" ]]; then
+                    git branch "$DEFAULT_BRANCH" "$remote_head" 2>/dev/null || true
+                    log "Created local branch '$DEFAULT_BRANCH' from $REMOTE_REF"
+                fi
+            fi
+
             local local_sha remote_sha
             local_sha=$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || echo "")
             remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
@@ -488,6 +510,11 @@ main() {
     log "=== claude-auto-debug finished ==="
     log "  Started  : $START_TS"
     log "  Finished : $(date -Iseconds)"
+
+    # Exit with non-zero if validation failed (surfaces failures in systemd/monitoring)
+    if [[ $VALIDATION_EXIT_CODE -ne 0 ]]; then
+        exit 1
+    fi
 }
 
 main "$@"

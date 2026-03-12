@@ -215,10 +215,17 @@ cp -r "${SCRIPT_DIR}/templates" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/auto-debug.sh"
 
 # config.env 생성 또는 업데이트
-# Use double quotes — load_config strips outer quotes without unescape,
-# so we must ensure values contain no embedded double quotes.
-# Config values (paths, commands) should not contain literal double quotes.
-quote_val() { printf '%s' "$1" | tr -d '"'; }
+# Values are written unquoted — load_config accepts KEY=value lines as-is.
+# The regex parser stops at end of line, so no quoting needed for simple values.
+write_val() {
+    local key="$1" val="$2"
+    # Values must not contain newlines (would break line-based parser)
+    if [[ "$val" == *$'\n'* ]]; then
+        echo "ERROR: Config value for $key contains newlines — not supported." >&2
+        exit 1
+    fi
+    printf '%s=%s\n' "$key" "$val"
+}
 
 write_config() {
     # Preserve user-added supported keys (LOG_DIR, DEAD_LETTER_DIR, etc.)
@@ -231,17 +238,17 @@ write_config() {
             | grep -v '^#' || true)
     fi
 
-    cat > "$CONFIG_FILE" << ENVEOF
-# Claude Auto-Debug — config
-# Re-run install.sh to update.
-
-PROJECT_DIR="$(quote_val "$PROJECT_DIR")"
-VALIDATION_CMD="$(quote_val "$VALIDATION_CMD")"
-ALLOWED_TOOLS="$(quote_val "$ALLOWED_TOOLS")"
-MAX_FILES="$(quote_val "$MAX_FILES")"
-LOG_RETENTION_DAYS="$(quote_val "$LOG_RETENTION_DAYS")"
-INTERVAL="$(quote_val "$INTERVAL")"
-ENVEOF
+    {
+        echo '# Claude Auto-Debug — config'
+        echo '# Re-run install.sh to update.'
+        echo ''
+        write_val PROJECT_DIR "$PROJECT_DIR"
+        write_val VALIDATION_CMD "$VALIDATION_CMD"
+        write_val ALLOWED_TOOLS "$ALLOWED_TOOLS"
+        write_val MAX_FILES "$MAX_FILES"
+        write_val LOG_RETENTION_DAYS "$LOG_RETENTION_DAYS"
+        write_val INTERVAL "$INTERVAL"
+    } > "$CONFIG_FILE"
 
     # Append preserved user keys
     if [[ -n "$extra_keys" ]]; then

@@ -226,7 +226,7 @@ check_dedup() {
 
     # Fetch upstream and fast-forward local branch if possible
     if [[ "$HAS_REMOTE" = true ]]; then
-        if git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+        if git fetch origin "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null; then
             local local_sha remote_sha
             local_sha=$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || echo "")
             remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
@@ -343,8 +343,18 @@ validate() {
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
-        # Do NOT update STATE_FILE here: no validation was run, so we cannot
-        # confirm the repo is in a healthy state.  The next run will re-check.
+        # Run validation to confirm the repo is healthy before marking as inspected
+        log "Running validation on clean worktree to verify repo health ..."
+        set +e
+        bash -c "$VALIDATION_CMD" 2>&1
+        local health_rc=$?
+        set -e
+        if [[ $health_rc -eq 0 ]]; then
+            log "Repo health check PASSED. Marking SHA as inspected."
+            echo "$CURRENT_SHA" > "$STATE_FILE"
+        else
+            log "Warning: Repo health check FAILED (exit $health_rc). SHA not marked — will retry next run."
+        fi
         exit 0
     fi
 
@@ -455,7 +465,7 @@ cleanup_old_logs() {
     log "Cleaning up logs older than ${LOG_RETENTION_DAYS} days ..."
     find "$LOG_DIR" -maxdepth 1 -name "*.log" \
         -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
-    find "$DEAD_LETTER_DIR" -maxdepth 1 -name "*.log" \
+    find "$DEAD_LETTER_DIR" -maxdepth 1 \( -name "*.log" -o -name "*.patch" \) \
         -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
 }
 

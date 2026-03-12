@@ -214,8 +214,11 @@ cp -r "${SCRIPT_DIR}/bin" "$INSTALL_DIR/"
 cp -r "${SCRIPT_DIR}/templates" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/auto-debug.sh"
 
-# config.env 생성 또는 업데이트 (값은 항상 따옴표로 감싸서 injection 방지)
-quote_val() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf '\n'; }
+# config.env 생성 또는 업데이트
+# Use double quotes — load_config strips outer quotes without unescape,
+# so we must ensure values contain no embedded double quotes.
+# Config values (paths, commands) should not contain literal double quotes.
+quote_val() { printf '%s' "$1" | tr -d '"'; }
 
 write_config() {
     # Preserve user-added supported keys (LOG_DIR, DEAD_LETTER_DIR, etc.)
@@ -232,12 +235,12 @@ write_config() {
 # Claude Auto-Debug — config
 # Re-run install.sh to update.
 
-PROJECT_DIR='$(quote_val "$PROJECT_DIR")'
-VALIDATION_CMD='$(quote_val "$VALIDATION_CMD")'
-ALLOWED_TOOLS='$(quote_val "$ALLOWED_TOOLS")'
-MAX_FILES='$(quote_val "$MAX_FILES")'
-LOG_RETENTION_DAYS='$(quote_val "$LOG_RETENTION_DAYS")'
-INTERVAL='$(quote_val "$INTERVAL")'
+PROJECT_DIR="$(quote_val "$PROJECT_DIR")"
+VALIDATION_CMD="$(quote_val "$VALIDATION_CMD")"
+ALLOWED_TOOLS="$(quote_val "$ALLOWED_TOOLS")"
+MAX_FILES="$(quote_val "$MAX_FILES")"
+LOG_RETENTION_DAYS="$(quote_val "$LOG_RETENTION_DAYS")"
+INTERVAL="$(quote_val "$INTERVAL")"
 ENVEOF
 
     # Append preserved user keys

@@ -29,11 +29,14 @@ WORKTREE_BASE="/tmp/claude-auto-debug-work"
 # ── Globals set during runtime ──────────────────────────────────────────────
 BRANCH_NAME=""
 WORKTREE_PATH=""
+DEFAULT_BRANCH=""
+REMOTE_REF=""
 VALIDATION_EXIT_CODE=0
 LOG_FILE=""
 LOCK_FD=9
 LOCK_FILE="/tmp/claude-auto-debug.lock"
 START_TS=""
+ORIGINAL_PROJECT_DIR=""
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -42,23 +45,66 @@ log() { echo "[$(date -Iseconds)] $*"; }
 err() { echo "[$(date -Iseconds)] ERROR: $*" >&2; }
 
 # ---------------------------------------------------------------------------
+# preflight — check required dependencies
+# ---------------------------------------------------------------------------
+preflight() {
+    local missing=()
+    command -v git      >/dev/null 2>&1 || missing+=("git")
+    command -v claude   >/dev/null 2>&1 || missing+=("claude (Claude Code CLI)")
+    command -v envsubst >/dev/null 2>&1 || missing+=("envsubst (install: apt install gettext-base)")
+    command -v flock    >/dev/null 2>&1 || missing+=("flock (install: apt install util-linux)")
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        err "Missing dependencies: ${missing[*]}"
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # cleanup — runs on EXIT via trap
 # ---------------------------------------------------------------------------
 cleanup() {
     local exit_code=$?
+    local proj="${ORIGINAL_PROJECT_DIR:-${PROJECT_DIR:-}}"
 
-    # Remove worktree if it exists
     if [[ -n "$WORKTREE_PATH" ]] && [[ -d "$WORKTREE_PATH" ]]; then
-        git -C "${PROJECT_DIR:-}" worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+        git -C "$proj" worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
     fi
 
-    # Delete the work branch if it still exists
-    if [[ -n "$BRANCH_NAME" ]] && git -C "${PROJECT_DIR:-}" rev-parse --verify "$BRANCH_NAME" &>/dev/null; then
-        git -C "${PROJECT_DIR:-}" branch -D "$BRANCH_NAME" 2>/dev/null || true
+    if [[ -n "$BRANCH_NAME" ]] && git -C "$proj" rev-parse --verify "$BRANCH_NAME" &>/dev/null 2>&1; then
+        git -C "$proj" branch -D "$BRANCH_NAME" 2>/dev/null || true
     fi
 
-    # flock releases automatically when fd closes on process exit
     return "$exit_code"
+}
+
+# ---------------------------------------------------------------------------
+# detect_default_branch — find remote default branch (main/master/etc)
+# ---------------------------------------------------------------------------
+detect_default_branch() {
+    cd "$PROJECT_DIR"
+
+    # Try remote HEAD
+    local ref
+    ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
+    if [[ -n "$ref" ]]; then
+        DEFAULT_BRANCH="${ref##*/}"
+        REMOTE_REF="origin/$DEFAULT_BRANCH"
+        return
+    fi
+
+    # Fallback: check common branch names
+    for branch in main master; do
+        if git rev-parse --verify "origin/$branch" &>/dev/null 2>&1; then
+            DEFAULT_BRANCH="$branch"
+            REMOTE_REF="origin/$branch"
+            return
+        fi
+    done
+
+    # Last resort: current branch
+    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    REMOTE_REF="origin/$DEFAULT_BRANCH"
 }
 
 # ---------------------------------------------------------------------------
@@ -69,6 +115,13 @@ setup() {
         err "PROJECT_DIR is not set. Set it in $CONFIG_FILE or as an environment variable."
         exit 1
     fi
+
+    if [[ ! -d "$PROJECT_DIR" ]]; then
+        err "PROJECT_DIR does not exist: $PROJECT_DIR"
+        exit 1
+    fi
+
+    ORIGINAL_PROJECT_DIR="$PROJECT_DIR"
 
     mkdir -p "$LOG_DIR" "$DEAD_LETTER_DIR" "$(dirname "$STATE_FILE")" "$WORKTREE_BASE"
 
@@ -85,6 +138,10 @@ setup() {
     log "  MAX_FILES        = $MAX_FILES"
     log "  PROMPT_TEMPLATE  = $PROMPT_TEMPLATE"
     log "  LOG_FILE         = $LOG_FILE"
+
+    detect_default_branch
+    log "  DEFAULT_BRANCH   = $DEFAULT_BRANCH"
+    log "  REMOTE_REF       = $REMOTE_REF"
 }
 
 # ---------------------------------------------------------------------------
@@ -104,15 +161,19 @@ single_instance() {
 check_dedup() {
     cd "$PROJECT_DIR"
 
-    git fetch origin main 2>/dev/null || true
+    if ! git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+        log "Warning: git fetch failed. Using local HEAD."
+    fi
+
     local current_sha
-    current_sha=$(git rev-parse origin/main)
+    current_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || git rev-parse HEAD)
 
     local last_sha
     last_sha=$(cat "$STATE_FILE" 2>/dev/null || echo "")
 
     if [[ -n "$last_sha" ]] && [[ "$current_sha" = "$last_sha" ]]; then
         log "No new commits since last successful run (SHA: ${current_sha:0:8}). Skipping."
+        echo "$current_sha" > "$STATE_FILE"
         exit 0
     fi
 
@@ -131,11 +192,10 @@ prepare_worktree() {
     BRANCH_NAME="auto-debug/${ts}"
     WORKTREE_PATH="${WORKTREE_BASE}/${BRANCH_NAME//\//-}"
 
-    # Clean up stale worktree path if it exists
     [[ -d "$WORKTREE_PATH" ]] && rm -rf "$WORKTREE_PATH"
 
     log "Creating worktree at $WORKTREE_PATH (branch: $BRANCH_NAME) ..."
-    git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" origin/main
+    git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$REMOTE_REF"
 
     log "Worktree ready."
 }
@@ -149,7 +209,6 @@ run_claude() {
         exit 3
     fi
 
-    # Build RECENT_CHANGES from git log (SHA range or fallback)
     local recent
     if [[ -n "$LAST_SHA" ]]; then
         recent=$(git -C "$WORKTREE_PATH" log --oneline "${LAST_SHA}..${CURRENT_SHA}" 2>/dev/null || echo "(none)")
@@ -166,7 +225,6 @@ run_claude() {
 
     log "Running Claude in worktree (branch: $BRANCH_NAME) ..."
 
-    # envsubst with EXPLICIT variable list — prevents accidental expansion
     local prompt
     prompt=$(envsubst '$PROJECT_DIR $VALIDATION_CMD $BRANCH_NAME $ALLOWED_TOOLS $RECENT_CHANGES $MAX_FILES' < "$PROMPT_TEMPLATE")
 
@@ -183,16 +241,16 @@ run_claude() {
 validate() {
     cd "$WORKTREE_PATH"
 
-    # Check if Claude made any changes
     local changed_files
     changed_files=$(git -C "$WORKTREE_PATH" diff HEAD --name-only | wc -l)
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
+        # Update state so we don't re-check the same SHA
+        echo "$CURRENT_SHA" > "$STATE_FILE"
         exit 0
     fi
 
-    # Post-hoc MAX_FILES enforcement
     if [[ "$changed_files" -gt "$MAX_FILES" ]]; then
         err "Claude modified $changed_files files (limit: $MAX_FILES). Aborting."
         VALIDATION_EXIT_CODE=1
@@ -201,7 +259,7 @@ validate() {
 
     log "Changes detected ($changed_files files). Running validation: $VALIDATION_CMD"
     set +e
-    eval "$VALIDATION_CMD" 2>&1
+    bash -c "$VALIDATION_CMD" 2>&1
     VALIDATION_EXIT_CODE=$?
     set -e
 
@@ -213,13 +271,16 @@ validate() {
 }
 
 # ---------------------------------------------------------------------------
-# merge_or_discard — on pass: merge to main; on fail: dead-letter
+# merge_or_discard — on pass: merge to default branch; on fail: dead-letter
 # ---------------------------------------------------------------------------
 merge_or_discard() {
-    cd "$PROJECT_DIR"
+    cd "$ORIGINAL_PROJECT_DIR"
 
     if [[ $VALIDATION_EXIT_CODE -eq 0 ]]; then
-        log "Merging $BRANCH_NAME into main ..."
+        log "Merging $BRANCH_NAME into $DEFAULT_BRANCH ..."
+
+        # Ensure we're on the default branch
+        git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
 
         # Remove worktree first so branch is not checked out
         git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
@@ -230,22 +291,18 @@ merge_or_discard() {
             exit 2
         fi
 
-        # Delete merged branch
         git branch -D "$BRANCH_NAME" 2>/dev/null || true
         BRANCH_NAME=""
 
-        # Update state with current SHA (write-on-success-only)
         echo "$CURRENT_SHA" > "$STATE_FILE"
         log "State updated: SHA ${CURRENT_SHA:0:8}"
-        log "Success: changes merged into main."
+        log "Success: changes merged into $DEFAULT_BRANCH."
     else
         log "Discarding failed branch. Copying log to dead-letter ..."
         local dead_log
         dead_log="$DEAD_LETTER_DIR/$(basename "$LOG_FILE")"
         cp "$LOG_FILE" "$dead_log"
         log "Dead-letter: $dead_log"
-
-        # Worktree + branch cleaned up by cleanup trap
         log "Branch will be discarded by cleanup trap."
     fi
 }
@@ -265,6 +322,7 @@ cleanup_old_logs() {
 # main
 # ---------------------------------------------------------------------------
 main() {
+    preflight
     single_instance
     trap cleanup EXIT
 

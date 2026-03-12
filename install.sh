@@ -53,16 +53,23 @@ HELPEOF
     exit 0
 }
 
+require_arg() {
+    if [[ $# -lt 2 || "$2" == --* ]]; then
+        echo "ERROR: $1 requires a value" >&2
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y|--yes)        OPT_YES=true; shift ;;
-        --interval)      OPT_INTERVAL="$2"; shift 2 ;;
-        --max-files)     OPT_MAX_FILES="$2"; shift 2 ;;
-        --allowed-tools) OPT_ALLOWED_TOOLS="$2"; shift 2 ;;
-        --validation)    OPT_VALIDATION="$2"; shift 2 ;;
-        --log-retention) OPT_LOG_RETENTION="$2"; shift 2 ;;
+        --interval)      require_arg "$@"; OPT_INTERVAL="$2"; shift 2 ;;
+        --max-files)     require_arg "$@"; OPT_MAX_FILES="$2"; shift 2 ;;
+        --allowed-tools) require_arg "$@"; OPT_ALLOWED_TOOLS="$2"; shift 2 ;;
+        --validation)    require_arg "$@"; OPT_VALIDATION="$2"; shift 2 ;;
+        --log-retention) require_arg "$@"; OPT_LOG_RETENTION="$2"; shift 2 ;;
         -h|--help)       show_help ;;
-        -*)              echo "Unknown option: $1" >&2; show_help ;;
+        -*)              echo "ERROR: Unknown option: $1" >&2; show_help ;;
         *)               OPT_PROJECT="$1"; shift ;;
     esac
 done
@@ -123,7 +130,11 @@ prompt_value() {
     echo "${result:-$default}"
 }
 
-if [[ "$OPT_YES" = false ]] && [[ -t 0 || -e /dev/tty ]]; then
+can_prompt() {
+    [[ "$OPT_YES" = false ]] && { [[ -t 0 ]] || { [[ -e /dev/tty ]] && echo test < /dev/tty >/dev/null 2>&1; }; }
+}
+
+if can_prompt; then
     echo ""
     echo "╔══════════════════════════════════════════╗"
     echo "║   claude-auto-debug installer            ║"
@@ -186,36 +197,28 @@ cp -r "${SCRIPT_DIR}/bin" "$INSTALL_DIR/"
 cp -r "${SCRIPT_DIR}/templates" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/auto-debug.sh"
 
-# config.env 생성 또는 업데이트
-update_config() {
-    local key="$1" val="$2"
-    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
-    else
-        echo "${key}=${val}" >> "$CONFIG_FILE"
-    fi
-}
+# config.env 생성 또는 업데이트 (값은 항상 따옴표로 감싸서 injection 방지)
+quote_val() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf '\n'; }
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
+write_config() {
     cat > "$CONFIG_FILE" << ENVEOF
 # Claude Auto-Debug — config
 # Re-run install.sh to update.
 
-PROJECT_DIR=${PROJECT_DIR}
-VALIDATION_CMD="${VALIDATION_CMD}"
-ALLOWED_TOOLS=${ALLOWED_TOOLS}
-MAX_FILES=${MAX_FILES}
-LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
-INTERVAL=${INTERVAL}
+PROJECT_DIR='$(quote_val "$PROJECT_DIR")'
+VALIDATION_CMD='$(quote_val "$VALIDATION_CMD")'
+ALLOWED_TOOLS='$(quote_val "$ALLOWED_TOOLS")'
+MAX_FILES='$(quote_val "$MAX_FILES")'
+LOG_RETENTION_DAYS='$(quote_val "$LOG_RETENTION_DAYS")'
+INTERVAL='$(quote_val "$INTERVAL")'
 ENVEOF
+}
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    write_config
     echo "  Config created: $CONFIG_FILE"
 else
-    update_config "PROJECT_DIR" "$PROJECT_DIR"
-    update_config "VALIDATION_CMD" "\"$VALIDATION_CMD\""
-    update_config "INTERVAL" "$INTERVAL"
-    update_config "MAX_FILES" "$MAX_FILES"
-    update_config "ALLOWED_TOOLS" "$ALLOWED_TOOLS"
-    update_config "LOG_RETENTION_DAYS" "$LOG_RETENTION_DAYS"
+    write_config
     echo "  Config updated: $CONFIG_FILE"
 fi
 

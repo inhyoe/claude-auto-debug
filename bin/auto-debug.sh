@@ -57,7 +57,7 @@ HAS_REMOTE=true
 VALIDATION_EXIT_CODE=0
 LOG_FILE=""
 LOCK_FD=9
-LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/claude-auto-debug.lock"
+LOCK_FILE="${HOME}/.config/claude-auto-debug/auto-debug.lock"
 START_TS=""
 ORIGINAL_PROJECT_DIR=""
 
@@ -217,21 +217,32 @@ single_instance() {
 check_dedup() {
     cd "$PROJECT_DIR"
 
+    # Fetch upstream and fast-forward local branch if possible
     if [[ "$HAS_REMOTE" = true ]]; then
-        if ! git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+        if git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+            local local_sha remote_sha
+            local_sha=$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || echo "")
+            remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
+            if [[ -n "$remote_sha" ]] && [[ "$local_sha" != "$remote_sha" ]]; then
+                if git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
+                    git update-ref "refs/heads/$DEFAULT_BRANCH" "$remote_sha" "$local_sha"
+                    log "Fast-forwarded $DEFAULT_BRANCH to upstream (${remote_sha:0:8})"
+                fi
+            fi
+        else
             log "Warning: git fetch failed. Using local HEAD."
         fi
     fi
 
+    # Always track LOCAL default branch head (consistent with worktree base and merge target)
     local current_sha
-    current_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || git rev-parse HEAD)
+    current_sha=$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || git rev-parse HEAD)
 
     local last_sha
     last_sha=$(cat "$STATE_FILE" 2>/dev/null || echo "")
 
     if [[ -n "$last_sha" ]] && [[ "$current_sha" = "$last_sha" ]]; then
         log "No new commits since last successful run (SHA: ${current_sha:0:8}). Skipping."
-        echo "$current_sha" > "$STATE_FILE"
         exit 0
     fi
 
@@ -253,7 +264,7 @@ prepare_worktree() {
     [[ -d "$WORKTREE_PATH" ]] && rm -rf "$WORKTREE_PATH"
 
     log "Creating worktree at $WORKTREE_PATH (branch: $BRANCH_NAME) ..."
-    git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$REMOTE_REF"
+    git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$DEFAULT_BRANCH"
 
     log "Worktree ready."
 }
@@ -299,9 +310,9 @@ run_claude() {
 validate() {
     cd "$WORKTREE_PATH"
 
-    # Compare against worktree base ref — catches both committed and uncommitted changes
+    # Compare against worktree base (DEFAULT_BRANCH) — catches both committed and uncommitted
     local changed_files
-    changed_files=$(git -C "$WORKTREE_PATH" diff "$REMOTE_REF" --name-only | wc -l)
+    changed_files=$(git -C "$WORKTREE_PATH" diff "$DEFAULT_BRANCH" --name-only | wc -l)
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
@@ -351,7 +362,6 @@ merge_or_discard() {
         git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
         WORKTREE_PATH=""
 
-        # Fast-forward merge via update-ref — does NOT change user's active branch/checkout
         local target_sha base_sha
         target_sha=$(git rev-parse "$BRANCH_NAME")
         base_sha=$(git rev-parse "$DEFAULT_BRANCH")
@@ -361,23 +371,29 @@ merge_or_discard() {
             exit 2
         fi
 
-        git update-ref "refs/heads/$DEFAULT_BRANCH" "$target_sha" "$base_sha"
+        # Merge strategy depends on whether DEFAULT_BRANCH is currently checked out
+        local current_branch
+        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+        if [[ "$current_branch" = "$DEFAULT_BRANCH" ]]; then
+            # Branch is checked out — use merge to keep working tree in sync
+            if ! git merge --ff-only "$BRANCH_NAME"; then
+                err "Fast-forward merge failed. Manual intervention required."
+                exit 2
+            fi
+        else
+            # Branch not checked out — update ref without touching working tree
+            git update-ref "refs/heads/$DEFAULT_BRANCH" "$target_sha" "$base_sha"
+        fi
 
         git branch -D "$BRANCH_NAME" 2>/dev/null || true
         BRANCH_NAME=""
 
-        # Dedup state: match what check_dedup() compares against
-        if [[ "$HAS_REMOTE" = true ]]; then
-            # Remote repos: track REMOTE_REF (same as check_dedup reads)
-            echo "$CURRENT_SHA" > "$STATE_FILE"
-            log "State updated: SHA ${CURRENT_SHA:0:8} (remote ref)"
-        else
-            # Local-only repos: track post-merge HEAD (local branch advances)
-            local merged_sha
-            merged_sha=$(git rev-parse "$DEFAULT_BRANCH")
-            echo "$merged_sha" > "$STATE_FILE"
-            log "State updated: SHA ${merged_sha:0:8} (local HEAD)"
-        fi
+        # Always track post-merge local HEAD (consistent with check_dedup)
+        local merged_sha
+        merged_sha=$(git rev-parse "$DEFAULT_BRANCH")
+        echo "$merged_sha" > "$STATE_FILE"
+        log "State updated: SHA ${merged_sha:0:8}"
         log "Success: changes merged into $DEFAULT_BRANCH."
     else
         log "Discarding failed branch. Copying log to dead-letter ..."

@@ -118,11 +118,21 @@ detect_default_branch() {
 
     HAS_REMOTE=true
 
-    # Try remote HEAD
+    # Try remote HEAD via local symbolic ref
     local ref
     ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
     if [[ -n "$ref" ]]; then
         DEFAULT_BRANCH="${ref##*/}"
+        REMOTE_REF="origin/$DEFAULT_BRANCH"
+        return
+    fi
+
+    # Try resolving via ls-remote (authoritative remote query)
+    local ls_ref
+    ls_ref=$(git ls-remote --symref origin HEAD 2>/dev/null \
+        | awk '/^ref:/{print $2}' | head -n1 || true)
+    if [[ -n "$ls_ref" ]]; then
+        DEFAULT_BRANCH="${ls_ref##*/}"
         REMOTE_REF="origin/$DEFAULT_BRANCH"
         return
     fi
@@ -136,15 +146,9 @@ detect_default_branch() {
         fi
     done
 
-    # Last resort: current branch, check if remote tracking exists
-    DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-    if git rev-parse --verify "origin/$DEFAULT_BRANCH" &>/dev/null 2>&1; then
-        REMOTE_REF="origin/$DEFAULT_BRANCH"
-    else
-        REMOTE_REF="$DEFAULT_BRANCH"
-        HAS_REMOTE=false
-        log "Warning: No remote tracking for '$DEFAULT_BRANCH'. Using local ref."
-    fi
+    # All remote detection failed — abort rather than silently using current branch
+    err "Cannot determine default branch from remote 'origin'. Set DEFAULT_BRANCH in config or run: git remote set-head origin --auto"
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -199,6 +203,9 @@ setup() {
 # single_instance — acquire flock; exit 0 if already running
 # ---------------------------------------------------------------------------
 single_instance() {
+    # Ensure lock directory exists (may not yet be created by setup on first run)
+    mkdir -p "$(dirname "$LOCK_FILE")"
+
     # Reject symlinks to prevent symlink attacks on lock file
     if [[ -L "$LOCK_FILE" ]]; then
         err "Lock file is a symlink (possible attack): $LOCK_FILE"
@@ -336,7 +343,8 @@ validate() {
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
-        echo "$CURRENT_SHA" > "$STATE_FILE"
+        # Do NOT update STATE_FILE here: no validation was run, so we cannot
+        # confirm the repo is in a healthy state.  The next run will re-check.
         exit 0
     fi
 
@@ -367,7 +375,9 @@ Co-Authored-By: Claude Auto-Debug <noreply@anthropic.com>"
             local commit_rc=$?
             set -e
             if [[ $commit_rc -ne 0 ]]; then
-                err "Commit failed (exit $commit_rc). Changes preserved for debugging."
+                err "Commit failed (exit $commit_rc). Saving diff to dead-letter before discard."
+                local fail_diff="$DEAD_LETTER_DIR/commit-fail-$(date '+%Y%m%d-%H%M%S').patch"
+                git -C "$WORKTREE_PATH" diff HEAD > "$fail_diff" 2>/dev/null || true
                 VALIDATION_EXIT_CODE=1
                 return
             fi

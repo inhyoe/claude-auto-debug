@@ -218,6 +218,16 @@ chmod +x "$INSTALL_DIR/bin/auto-debug.sh"
 quote_val() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf '\n'; }
 
 write_config() {
+    # Preserve user-added supported keys (LOG_DIR, DEAD_LETTER_DIR, etc.)
+    # that the installer does not manage directly.
+    local extra_keys=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        local managed="PROJECT_DIR|VALIDATION_CMD|ALLOWED_TOOLS|MAX_FILES|LOG_RETENTION_DAYS|INTERVAL"
+        extra_keys=$(grep -E '^[A-Z_]+=' "$CONFIG_FILE" \
+            | grep -vE "^(${managed})=" \
+            | grep -v '^#' || true)
+    fi
+
     cat > "$CONFIG_FILE" << ENVEOF
 # Claude Auto-Debug — config
 # Re-run install.sh to update.
@@ -229,6 +239,12 @@ MAX_FILES='$(quote_val "$MAX_FILES")'
 LOG_RETENTION_DAYS='$(quote_val "$LOG_RETENTION_DAYS")'
 INTERVAL='$(quote_val "$INTERVAL")'
 ENVEOF
+
+    # Append preserved user keys
+    if [[ -n "$extra_keys" ]]; then
+        printf '\n# User-defined overrides (preserved across reinstall)\n' >> "$CONFIG_FILE"
+        printf '%s\n' "$extra_keys" >> "$CONFIG_FILE"
+    fi
 }
 
 if [[ ! -f "$CONFIG_FILE" ]]; then

@@ -225,14 +225,25 @@ check_dedup() {
             remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
             if [[ -n "$remote_sha" ]] && [[ "$local_sha" != "$remote_sha" ]]; then
                 if git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
-                    local current_branch
+                    local current_branch ff_ok=true
                     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
                     if [[ "$current_branch" = "$DEFAULT_BRANCH" ]]; then
-                        git merge --ff-only "$REMOTE_REF" 2>/dev/null || true
+                        if ! git merge --ff-only "$REMOTE_REF" 2>/dev/null; then
+                            log "Warning: Fast-forward failed (dirty worktree?). Using local HEAD."
+                            ff_ok=false
+                        fi
                     else
-                        git update-ref "refs/heads/$DEFAULT_BRANCH" "$remote_sha" "$local_sha"
+                        # Verify DEFAULT_BRANCH is not checked out in another worktree
+                        if git worktree list --porcelain 2>/dev/null | grep -qF "branch refs/heads/$DEFAULT_BRANCH"; then
+                            log "Warning: $DEFAULT_BRANCH is checked out in a worktree. Skipping ref update."
+                            ff_ok=false
+                        else
+                            git update-ref "refs/heads/$DEFAULT_BRANCH" "$remote_sha" "$local_sha"
+                        fi
                     fi
-                    log "Fast-forwarded $DEFAULT_BRANCH to upstream (${remote_sha:0:8})"
+                    if [[ "$ff_ok" = true ]]; then
+                        log "Fast-forwarded $DEFAULT_BRANCH to upstream (${remote_sha:0:8})"
+                    fi
                 fi
             fi
         else
@@ -399,7 +410,12 @@ merge_or_discard() {
                 exit 2
             fi
         else
-            # Branch not checked out — update ref without touching working tree
+            # Verify DEFAULT_BRANCH is not checked out in another worktree
+            if git worktree list --porcelain 2>/dev/null | grep -qF "branch refs/heads/$DEFAULT_BRANCH"; then
+                err "$DEFAULT_BRANCH is checked out in another worktree. Manual merge required."
+                exit 2
+            fi
+            # Branch not checked out anywhere — update ref without touching working tree
             git update-ref "refs/heads/$DEFAULT_BRANCH" "$target_sha" "$base_sha"
         fi
 

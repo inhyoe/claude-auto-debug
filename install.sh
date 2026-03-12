@@ -115,12 +115,36 @@ detect_validation_cmd() {
     fi
 }
 
-# 기본값 결정: CLI 옵션 > 자동 감지/하드코딩 기본값
+# ── Read helper ─────────────────────────────────────────────────────────────
+read_config_value() {
+    local key="$1" file="$2" default="$3"
+    local line
+    line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 || true)"
+    if [[ -z "$line" ]]; then
+        printf '%s\n' "$default"
+        return
+    fi
+    local val="${line#*=}"
+    val="${val#\"}" ; val="${val%\"}"
+    val="${val#\'}" ; val="${val%\'}"
+    printf '%s\n' "$val"
+}
+
+# 기본값 결정: CLI 옵션 > 기존 config > 자동 감지/하드코딩 기본값
 VALIDATION_CMD="${OPT_VALIDATION:-$(detect_validation_cmd "$PROJECT_DIR")}"
 INTERVAL="${OPT_INTERVAL:-6h}"
 MAX_FILES="${OPT_MAX_FILES:-3}"
 ALLOWED_TOOLS="${OPT_ALLOWED_TOOLS:-Read,Edit,Write,Glob,Grep,Bash}"
 LOG_RETENTION_DAYS="${OPT_LOG_RETENTION:-30}"
+
+# Preserve existing config values for keys not overridden by CLI options
+if [[ -f "$CONFIG_FILE" ]]; then
+    [[ -z "$OPT_VALIDATION" ]]    && VALIDATION_CMD="$(read_config_value VALIDATION_CMD "$CONFIG_FILE" "$VALIDATION_CMD")"
+    [[ -z "$OPT_INTERVAL" ]]      && INTERVAL="$(read_config_value INTERVAL "$CONFIG_FILE" "$INTERVAL")"
+    [[ -z "$OPT_MAX_FILES" ]]     && MAX_FILES="$(read_config_value MAX_FILES "$CONFIG_FILE" "$MAX_FILES")"
+    [[ -z "$OPT_ALLOWED_TOOLS" ]] && ALLOWED_TOOLS="$(read_config_value ALLOWED_TOOLS "$CONFIG_FILE" "$ALLOWED_TOOLS")"
+    [[ -z "$OPT_LOG_RETENTION" ]] && LOG_RETENTION_DAYS="$(read_config_value LOG_RETENTION_DAYS "$CONFIG_FILE" "$LOG_RETENTION_DAYS")"
+fi
 
 # ── 대화형 설치 ─────────────────────────────────────────────────────────────
 # 사용자에게 입력 받아서 기본값을 대체. Enter만 치면 기본값 유지.
@@ -170,21 +194,6 @@ if can_prompt; then
         exit 0
     fi
 fi
-
-# ── Read helper ─────────────────────────────────────────────────────────────
-read_config_value() {
-    local key="$1" file="$2" default="$3"
-    local line
-    line="$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 || true)"
-    if [[ -z "$line" ]]; then
-        printf '%s\n' "$default"
-        return
-    fi
-    local val="${line#*=}"
-    val="${val#\"}" ; val="${val%\"}"
-    val="${val#\'}" ; val="${val%\'}"
-    printf '%s\n' "$val"
-}
 
 # ── 입력 검증 (파일 생성 전에 실행) ──────────────────────────────────────────
 # Validate INTERVAL format (systemd OnUnitActiveSec syntax: digits + optional unit)

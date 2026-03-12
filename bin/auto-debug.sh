@@ -164,6 +164,16 @@ setup() {
     ORIGINAL_PROJECT_DIR="$PROJECT_DIR"
 
     mkdir -p "$LOG_DIR" "$DEAD_LETTER_DIR" "$(dirname "$STATE_FILE")"
+
+    # Verify WORKTREE_BASE ownership (mitigate pre-created directory attacks)
+    if [[ -d "$WORKTREE_BASE" ]]; then
+        local dir_owner
+        dir_owner=$(stat -c '%u' "$WORKTREE_BASE" 2>/dev/null || echo "")
+        if [[ -n "$dir_owner" ]] && [[ "$dir_owner" != "$(id -u)" ]]; then
+            err "WORKTREE_BASE owned by uid=$dir_owner (expected $(id -u)): $WORKTREE_BASE"
+            exit 1
+        fi
+    fi
     mkdir -p -m 700 "$WORKTREE_BASE"
 
     local ts
@@ -316,7 +326,10 @@ validate() {
         # Ensure all changes are committed (prompt tells Claude NOT to commit)
         if [[ -n "$(git -C "$WORKTREE_PATH" status --porcelain)" ]]; then
             git -C "$WORKTREE_PATH" add -A
-            git -C "$WORKTREE_PATH" commit -m "fix(auto-debug): automated code quality fix
+            git -C "$WORKTREE_PATH" \
+                -c user.name="Claude Auto-Debug" \
+                -c user.email="noreply@auto-debug" \
+                commit -m "fix(auto-debug): automated code quality fix
 
 Co-Authored-By: Claude Auto-Debug <noreply@anthropic.com>"
         fi
@@ -334,29 +347,37 @@ merge_or_discard() {
     if [[ $VALIDATION_EXIT_CODE -eq 0 ]]; then
         log "Merging $BRANCH_NAME into $DEFAULT_BRANCH ..."
 
-        # Ensure we're on the default branch — abort merge if checkout fails
-        if ! git checkout "$DEFAULT_BRANCH" 2>&1; then
-            err "Cannot checkout '$DEFAULT_BRANCH'. Working tree dirty or branch missing."
-            exit 2
-        fi
-
-        # Remove worktree first so branch is not checked out
+        # Remove worktree first so branch ref is free
         git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
         WORKTREE_PATH=""
 
-        if ! git merge --ff-only "$BRANCH_NAME"; then
-            err "Fast-forward merge failed. Manual intervention required."
+        # Fast-forward merge via update-ref — does NOT change user's active branch/checkout
+        local target_sha base_sha
+        target_sha=$(git rev-parse "$BRANCH_NAME")
+        base_sha=$(git rev-parse "$DEFAULT_BRANCH")
+
+        if ! git merge-base --is-ancestor "$base_sha" "$target_sha"; then
+            err "Fast-forward merge not possible. Manual intervention required."
             exit 2
         fi
+
+        git update-ref "refs/heads/$DEFAULT_BRANCH" "$target_sha" "$base_sha"
 
         git branch -D "$BRANCH_NAME" 2>/dev/null || true
         BRANCH_NAME=""
 
-        # Record post-merge HEAD (not pre-merge CURRENT_SHA) for correct dedup
-        local merged_sha
-        merged_sha=$(git rev-parse HEAD)
-        echo "$merged_sha" > "$STATE_FILE"
-        log "State updated: SHA ${merged_sha:0:8}"
+        # Dedup state: match what check_dedup() compares against
+        if [[ "$HAS_REMOTE" = true ]]; then
+            # Remote repos: track REMOTE_REF (same as check_dedup reads)
+            echo "$CURRENT_SHA" > "$STATE_FILE"
+            log "State updated: SHA ${CURRENT_SHA:0:8} (remote ref)"
+        else
+            # Local-only repos: track post-merge HEAD (local branch advances)
+            local merged_sha
+            merged_sha=$(git rev-parse "$DEFAULT_BRANCH")
+            echo "$merged_sha" > "$STATE_FILE"
+            log "State updated: SHA ${merged_sha:0:8} (local HEAD)"
+        fi
         log "Success: changes merged into $DEFAULT_BRANCH."
     else
         log "Discarding failed branch. Copying log to dead-letter ..."

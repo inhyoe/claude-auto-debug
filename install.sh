@@ -199,7 +199,8 @@ mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
 echo ""
 echo "Installing ..."
 
-# bin/ + templates/ 복사
+# bin/ + templates/ 복사 (기존 제거 후 복사 — 멱등성 보장)
+rm -rf "$INSTALL_DIR/bin" "$INSTALL_DIR/templates"
 cp -r "${SCRIPT_DIR}/bin" "$INSTALL_DIR/"
 cp -r "${SCRIPT_DIR}/templates" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/auto-debug.sh"

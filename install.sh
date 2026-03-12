@@ -3,11 +3,10 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # install.sh — claude-auto-debug 설치
-# 사용법: 대상 프로젝트 디렉토리에서 실행
-#   cd /path/to/my-project
-#   bash /path/to/claude-auto-debug/install.sh
-# 또는 인자로 지정:
-#   bash install.sh /path/to/my-project
+# 사용법:
+#   cd /path/to/my-project && bash install.sh
+#   bash install.sh --interval 12h --max-files 5
+#   bash <(curl ...) --interval 1d --allowed-tools "Read,Grep"
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,9 +19,50 @@ TIMER_TEMPLATE="${SCRIPT_DIR}/systemd/auto-debug.timer.template"
 SERVICE_TARGET="${SYSTEMD_USER_DIR}/auto-debug.service"
 TIMER_TARGET="${SYSTEMD_USER_DIR}/auto-debug.timer"
 
+# ── 옵션 파싱 ──────────────────────────────────────────────────────────────
+OPT_PROJECT=""
+OPT_INTERVAL=""
+OPT_MAX_FILES=""
+OPT_ALLOWED_TOOLS=""
+OPT_VALIDATION=""
+OPT_LOG_RETENTION=""
+
+show_help() {
+    cat <<'HELPEOF'
+Usage: install.sh [OPTIONS] [PROJECT_DIR]
+
+Options:
+  --interval TIME        실행 주기 (기본: 6h). 예: 30m, 1h, 6h, 1d
+  --max-files N          1회 최대 수정 파일 수 (기본: 3)
+  --allowed-tools LIST   Claude 허용 도구 (기본: Read,Edit,Write,Glob,Grep,Bash)
+  --validation CMD       검증 명령어 (기본: 자동 감지)
+  --log-retention DAYS   로그 보존 기간 (기본: 30)
+  -h, --help             도움말
+
+Examples:
+  cd ~/my-project && bash install.sh
+  bash install.sh --interval 12h --max-files 5
+  bash install.sh --interval 1d ~/my-project
+HELPEOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --interval)      OPT_INTERVAL="$2"; shift 2 ;;
+        --max-files)     OPT_MAX_FILES="$2"; shift 2 ;;
+        --allowed-tools) OPT_ALLOWED_TOOLS="$2"; shift 2 ;;
+        --validation)    OPT_VALIDATION="$2"; shift 2 ;;
+        --log-retention) OPT_LOG_RETENTION="$2"; shift 2 ;;
+        -h|--help)       show_help ;;
+        -*)              echo "Unknown option: $1" >&2; show_help ;;
+        *)               OPT_PROJECT="$1"; shift ;;
+    esac
+done
+
 # ── PROJECT_DIR: 인자 > 현재 디렉토리 ──────────────────────────────────────
-if [[ -n "${1:-}" ]]; then
-    PROJECT_DIR="$(cd "$1" && pwd)"
+if [[ -n "$OPT_PROJECT" ]]; then
+    PROJECT_DIR="$(cd "$OPT_PROJECT" && pwd)"
 else
     PROJECT_DIR="$(pwd)"
 fi
@@ -67,7 +107,18 @@ detect_validation_cmd() {
     fi
 }
 
-VALIDATION_CMD="$(detect_validation_cmd "$PROJECT_DIR")"
+# CLI 옵션 우선, 없으면 자동 감지
+if [[ -n "$OPT_VALIDATION" ]]; then
+    VALIDATION_CMD="$OPT_VALIDATION"
+else
+    VALIDATION_CMD="$(detect_validation_cmd "$PROJECT_DIR")"
+fi
+
+# 나머지 옵션 기본값
+INTERVAL="${OPT_INTERVAL:-6h}"
+MAX_FILES="${OPT_MAX_FILES:-3}"
+ALLOWED_TOOLS="${OPT_ALLOWED_TOOLS:-Read,Edit,Write,Glob,Grep,Bash}"
+LOG_RETENTION_DAYS="${OPT_LOG_RETENTION:-30}"
 
 # ── Read helper ─────────────────────────────────────────────────────────────
 read_config_value() {
@@ -102,34 +153,36 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     # 새 config 생성 — 자동 감지 값 적용
     cat > "$CONFIG_FILE" << ENVEOF
 # Claude Auto-Debug — auto-generated config
-# Re-run install.sh to update PROJECT_DIR and VALIDATION_CMD.
+# Re-run install.sh [--option value] to update.
 
 PROJECT_DIR=${PROJECT_DIR}
 VALIDATION_CMD="${VALIDATION_CMD}"
-ALLOWED_TOOLS=Read,Edit,Write,Glob,Grep,Bash
-MAX_FILES=3
-LOG_RETENTION_DAYS=30
-INTERVAL=6h
+ALLOWED_TOOLS=${ALLOWED_TOOLS}
+MAX_FILES=${MAX_FILES}
+LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
+INTERVAL=${INTERVAL}
 ENVEOF
     echo "Created config: $CONFIG_FILE"
 else
-    # config 존재 — PROJECT_DIR과 VALIDATION_CMD만 업데이트
-    if grep -q '^PROJECT_DIR=' "$CONFIG_FILE"; then
-        sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=${PROJECT_DIR}|" "$CONFIG_FILE"
-    else
-        echo "PROJECT_DIR=${PROJECT_DIR}" >> "$CONFIG_FILE"
-    fi
-    if grep -q '^VALIDATION_CMD=' "$CONFIG_FILE"; then
-        sed -i "s|^VALIDATION_CMD=.*|VALIDATION_CMD=\"${VALIDATION_CMD}\"|" "$CONFIG_FILE"
-    else
-        echo "VALIDATION_CMD=\"${VALIDATION_CMD}\"" >> "$CONFIG_FILE"
-    fi
-    echo "Updated config: PROJECT_DIR=$PROJECT_DIR"
+    # config 존재 — 지정된 옵션만 업데이트
+    update_config() {
+        local key="$1" val="$2"
+        if grep -q "^${key}=" "$CONFIG_FILE"; then
+            sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
+        else
+            echo "${key}=${val}" >> "$CONFIG_FILE"
+        fi
+    }
+    update_config "PROJECT_DIR" "$PROJECT_DIR"
+    update_config "VALIDATION_CMD" "\"$VALIDATION_CMD\""
+    [[ -n "$OPT_INTERVAL" ]]      && update_config "INTERVAL" "$INTERVAL"
+    [[ -n "$OPT_MAX_FILES" ]]     && update_config "MAX_FILES" "$MAX_FILES"
+    [[ -n "$OPT_ALLOWED_TOOLS" ]] && update_config "ALLOWED_TOOLS" "$ALLOWED_TOOLS"
+    [[ -n "$OPT_LOG_RETENTION" ]] && update_config "LOG_RETENTION_DAYS" "$LOG_RETENTION_DAYS"
+    echo "Updated config: $CONFIG_FILE"
 fi
 
-# systemd timer 생성
-INTERVAL="$(read_config_value "INTERVAL" "$CONFIG_FILE" "6h")"
-[[ -z "$INTERVAL" ]] && INTERVAL="6h"
+# systemd timer 생성 (INTERVAL은 이미 옵션/기본값에서 설정됨)
 
 rendered_timer="$(mktemp)"
 trap 'rm -f "$rendered_timer"' EXIT
@@ -143,11 +196,13 @@ systemctl --user enable --now auto-debug.timer
 
 echo ""
 echo "=== Installation complete ==="
-echo "  Project:    $PROJECT_DIR"
-echo "  Validation: $VALIDATION_CMD"
-echo "  Interval:   every $INTERVAL"
-echo "  Config:     $CONFIG_FILE"
-echo "  Logs:       journalctl --user -u auto-debug.service"
+echo "  Project:      $PROJECT_DIR"
+echo "  Validation:   $VALIDATION_CMD"
+echo "  Interval:     every $INTERVAL"
+echo "  Max files:    $MAX_FILES"
+echo "  Allowed tools: $ALLOWED_TOOLS"
+echo "  Config:       $CONFIG_FILE"
+echo "  Logs:         journalctl --user -u auto-debug.service"
 echo ""
 echo "For 24/7 operation (survives logout):"
 echo "  loginctl enable-linger \$(whoami)"

@@ -186,6 +186,13 @@ read_config_value() {
     printf '%s\n' "$val"
 }
 
+# ── 입력 검증 (파일 생성 전에 실행) ──────────────────────────────────────────
+# Validate INTERVAL format (systemd OnUnitActiveSec syntax: digits + optional unit)
+if ! [[ "$INTERVAL" =~ ^[0-9]+[smhd]?$ ]]; then
+    echo "ERROR: Invalid interval: '$INTERVAL'. Expected format: 30m, 1h, 6h, 1d" >&2
+    exit 1
+fi
+
 # ── 설치 실행 ───────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
 
@@ -222,13 +229,7 @@ else
     echo "  Config updated: $CONFIG_FILE"
 fi
 
-# Validate INTERVAL format (systemd OnUnitActiveSec syntax: digits + optional unit)
-if ! [[ "$INTERVAL" =~ ^[0-9]+[smhd]?$ ]]; then
-    echo "ERROR: Invalid interval: '$INTERVAL'. Expected format: 30m, 1h, 6h, 1d" >&2
-    exit 1
-fi
-
-# systemd timer (using | delimiter — safe because INTERVAL is validated above)
+# systemd timer (INTERVAL already validated above — safe to substitute)
 rendered_timer="$(mktemp)"
 trap 'rm -f "$rendered_timer"' EXIT
 sed "s|%%INTERVAL%%|${INTERVAL}|g" "$TIMER_TEMPLATE" > "$rendered_timer"

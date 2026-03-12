@@ -46,7 +46,7 @@ fi
 : "${STATE_FILE:=$HOME/.config/claude-auto-debug/state}"
 : "${LOG_RETENTION_DAYS:=30}"
 : "${PROMPT_TEMPLATE:=$(cd "$(dirname "$0")" && pwd)/../templates/debug-prompt.md}"
-WORKTREE_BASE="/tmp/claude-auto-debug-work"
+WORKTREE_BASE="${XDG_RUNTIME_DIR:-/tmp}/claude-auto-debug-work"
 
 # ── Globals set during runtime ──────────────────────────────────────────────
 BRANCH_NAME=""
@@ -57,7 +57,7 @@ HAS_REMOTE=true
 VALIDATION_EXIT_CODE=0
 LOG_FILE=""
 LOCK_FD=9
-LOCK_FILE="/tmp/claude-auto-debug.lock"
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/claude-auto-debug.lock"
 START_TS=""
 ORIGINAL_PROJECT_DIR=""
 
@@ -163,7 +163,8 @@ setup() {
 
     ORIGINAL_PROJECT_DIR="$PROJECT_DIR"
 
-    mkdir -p "$LOG_DIR" "$DEAD_LETTER_DIR" "$(dirname "$STATE_FILE")" "$WORKTREE_BASE"
+    mkdir -p "$LOG_DIR" "$DEAD_LETTER_DIR" "$(dirname "$STATE_FILE")"
+    mkdir -p -m 700 "$WORKTREE_BASE"
 
     local ts
     ts=$(date '+%Y-%m-%d-%H%M%S')
@@ -188,6 +189,11 @@ setup() {
 # single_instance — acquire flock; exit 0 if already running
 # ---------------------------------------------------------------------------
 single_instance() {
+    # Reject symlinks to prevent symlink attacks on lock file
+    if [[ -L "$LOCK_FILE" ]]; then
+        err "Lock file is a symlink (possible attack): $LOCK_FILE"
+        exit 1
+    fi
     eval "exec ${LOCK_FD}>'$LOCK_FILE'"
     if ! flock -n "$LOCK_FD"; then
         log "Another instance is already running. Exiting."
@@ -283,12 +289,12 @@ run_claude() {
 validate() {
     cd "$WORKTREE_PATH"
 
+    # Compare against worktree base ref — catches both committed and uncommitted changes
     local changed_files
-    changed_files=$(git -C "$WORKTREE_PATH" diff HEAD --name-only | wc -l)
+    changed_files=$(git -C "$WORKTREE_PATH" diff "$REMOTE_REF" --name-only | wc -l)
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
-        # Update state so we don't re-check the same SHA
         echo "$CURRENT_SHA" > "$STATE_FILE"
         exit 0
     fi
@@ -307,6 +313,13 @@ validate() {
 
     if [[ $VALIDATION_EXIT_CODE -eq 0 ]]; then
         log "Validation PASSED."
+        # Ensure all changes are committed (prompt tells Claude NOT to commit)
+        if [[ -n "$(git -C "$WORKTREE_PATH" status --porcelain)" ]]; then
+            git -C "$WORKTREE_PATH" add -A
+            git -C "$WORKTREE_PATH" commit -m "fix(auto-debug): automated code quality fix
+
+Co-Authored-By: Claude Auto-Debug <noreply@anthropic.com>"
+        fi
     else
         log "Validation FAILED (exit $VALIDATION_EXIT_CODE)."
     fi
@@ -339,8 +352,11 @@ merge_or_discard() {
         git branch -D "$BRANCH_NAME" 2>/dev/null || true
         BRANCH_NAME=""
 
-        echo "$CURRENT_SHA" > "$STATE_FILE"
-        log "State updated: SHA ${CURRENT_SHA:0:8}"
+        # Record post-merge HEAD (not pre-merge CURRENT_SHA) for correct dedup
+        local merged_sha
+        merged_sha=$(git rev-parse HEAD)
+        echo "$merged_sha" > "$STATE_FILE"
+        log "State updated: SHA ${merged_sha:0:8}"
         log "Success: changes merged into $DEFAULT_BRANCH."
     else
         log "Discarding failed branch. Copying log to dead-letter ..."

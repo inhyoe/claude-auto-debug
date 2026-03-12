@@ -7,6 +7,7 @@ You are a code quality analyst and fixer. Your task is to find and fix code qual
 3. Do NOT delete or restructure directories unless a clear bug requires it.
 4. Do NOT modify files outside ${PROJECT_DIR}.
 5. This branch is: ${BRANCH_NAME} — all changes stay on this branch.
+6. Do NOT run `git commit`, `git add`, or any git write commands. The pipeline handles all git operations.
 
 ## Recent Changes (already fixed — skip these)
 
@@ -33,14 +34,9 @@ ${RECENT_CHANGES}
 
 ### Step 4: Validate
 - Run the validation command: ${VALIDATION_CMD}
-- If validation passes (exit 0): proceed to Step 5.
+- If validation passes (exit 0): report "FIXED" with the list of changes. Do NOT commit.
 - If validation fails (exit non-zero): do NOT revert changes — leave the failed state
   intact for debugging. Report "VALIDATION_FAILED" with the error output and stop.
-
-### Step 5: Commit
-- Stage only the files you modified (do not use `git add -A`).
-- Commit with message format: `fix(auto-debug): <brief description of fix>`
-- Add trailer: `Co-Authored-By: Claude Auto-Debug <noreply@anthropic.com>`
 
 ## Output
 

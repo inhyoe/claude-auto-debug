@@ -13,7 +13,7 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading claude-auto-debug ..."
-git clone --depth 1 "$REPO" "$TMPDIR/claude-auto-debug" 2>/dev/null
+git clone --depth 1 "$REPO" "$TMPDIR/claude-auto-debug"
 
 echo ""
 bash "$TMPDIR/claude-auto-debug/install.sh" "$@"

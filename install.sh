@@ -7,7 +7,7 @@ set -euo pipefail
 #   cd /path/to/my-project && bash install.sh          # 대화형 (기본)
 #   bash install.sh -y                                  # 자동 (기본값 사용)
 #   bash install.sh --interval 12h --max-files 5        # 특정 옵션 지정
-#   bash <(curl ...) -y                                 # 원라인 자동 설치
+#   원라인 설치는 setup.sh 사용 (README.md 참조)
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -222,10 +222,16 @@ else
     echo "  Config updated: $CONFIG_FILE"
 fi
 
-# systemd timer
+# Validate INTERVAL format (systemd OnUnitActiveSec syntax: digits + optional unit)
+if ! [[ "$INTERVAL" =~ ^[0-9]+[smhd]?$ ]]; then
+    echo "ERROR: Invalid interval: '$INTERVAL'. Expected format: 30m, 1h, 6h, 1d" >&2
+    exit 1
+fi
+
+# systemd timer (using | delimiter — safe because INTERVAL is validated above)
 rendered_timer="$(mktemp)"
 trap 'rm -f "$rendered_timer"' EXIT
-sed "s/%%INTERVAL%%/${INTERVAL}/g" "$TIMER_TEMPLATE" > "$rendered_timer"
+sed "s|%%INTERVAL%%|${INTERVAL}|g" "$TIMER_TEMPLATE" > "$rendered_timer"
 
 install -m 0644 "$SERVICE_SOURCE" "$SERVICE_TARGET"
 install -m 0644 "$rendered_timer" "$TIMER_TARGET"

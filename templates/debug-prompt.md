@@ -34,8 +34,8 @@ ${RECENT_CHANGES}
 ### Step 4: Validate
 - Run the validation command: ${VALIDATION_CMD}
 - If validation passes (exit 0): proceed to Step 5.
-- If validation fails (exit non-zero): revert your changes using `git checkout -- .` and stop.
-  Report "VALIDATION_FAILED" with the error output.
+- If validation fails (exit non-zero): do NOT revert changes — leave the failed state
+  intact for debugging. Report "VALIDATION_FAILED" with the error output and stop.
 
 ### Step 5: Commit
 - Stage only the files you modified (do not use `git add -A`).

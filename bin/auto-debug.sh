@@ -7,11 +7,33 @@ set -euo pipefail
 # validates the result, and merges or discards.
 # ---------------------------------------------------------------------------
 
-# ── Config loading ──────────────────────────────────────────────────────────
+# ── Config loading (safe key-value parser — no arbitrary shell execution) ─────
+load_config() {
+    local file="$1" line key val
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*($|#) ]] && continue
+        [[ "$line" =~ ^([A-Z_]+)=(.*) ]] || continue
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        # Strip surrounding quotes (single or double)
+        case "$val" in
+            \'*\') val="${val:1:${#val}-2}" ;;
+            \"*\") val="${val:1:${#val}-2}" ;;
+        esac
+        # Only accept known config keys (allowlist)
+        case "$key" in
+            PROJECT_DIR|VALIDATION_CMD|ALLOWED_TOOLS|MAX_FILES|\
+            LOG_RETENTION_DAYS|INTERVAL|MAX_RECENT_COMMITS|\
+            LOG_DIR|DEAD_LETTER_DIR|STATE_FILE|PROMPT_TEMPLATE)
+                export "$key=$val"
+                ;;
+        esac
+    done < "$file"
+}
+
 CONFIG_FILE="${CONFIG_FILE:-$HOME/.config/claude-auto-debug/config.env}"
 if [[ -f "$CONFIG_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
+    load_config "$CONFIG_FILE"
 fi
 
 # ── Default config values ───────────────────────────────────────────────────
@@ -31,6 +53,7 @@ BRANCH_NAME=""
 WORKTREE_PATH=""
 DEFAULT_BRANCH=""
 REMOTE_REF=""
+HAS_REMOTE=true
 VALIDATION_EXIT_CODE=0
 LOG_FILE=""
 LOCK_FD=9
@@ -84,6 +107,17 @@ cleanup() {
 detect_default_branch() {
     cd "$PROJECT_DIR"
 
+    # Check if remote 'origin' exists
+    if ! git remote get-url origin &>/dev/null; then
+        log "Warning: No 'origin' remote. Using local branches only."
+        DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        REMOTE_REF="$DEFAULT_BRANCH"
+        HAS_REMOTE=false
+        return
+    fi
+
+    HAS_REMOTE=true
+
     # Try remote HEAD
     local ref
     ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -102,9 +136,15 @@ detect_default_branch() {
         fi
     done
 
-    # Last resort: current branch
+    # Last resort: current branch, check if remote tracking exists
     DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-    REMOTE_REF="origin/$DEFAULT_BRANCH"
+    if git rev-parse --verify "origin/$DEFAULT_BRANCH" &>/dev/null 2>&1; then
+        REMOTE_REF="origin/$DEFAULT_BRANCH"
+    else
+        REMOTE_REF="$DEFAULT_BRANCH"
+        HAS_REMOTE=false
+        log "Warning: No remote tracking for '$DEFAULT_BRANCH'. Using local ref."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -161,8 +201,10 @@ single_instance() {
 check_dedup() {
     cd "$PROJECT_DIR"
 
-    if ! git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
-        log "Warning: git fetch failed. Using local HEAD."
+    if [[ "$HAS_REMOTE" = true ]]; then
+        if ! git fetch origin "$DEFAULT_BRANCH" 2>/dev/null; then
+            log "Warning: git fetch failed. Using local HEAD."
+        fi
     fi
 
     local current_sha
@@ -279,8 +321,11 @@ merge_or_discard() {
     if [[ $VALIDATION_EXIT_CODE -eq 0 ]]; then
         log "Merging $BRANCH_NAME into $DEFAULT_BRANCH ..."
 
-        # Ensure we're on the default branch
-        git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
+        # Ensure we're on the default branch — abort merge if checkout fails
+        if ! git checkout "$DEFAULT_BRANCH" 2>&1; then
+            err "Cannot checkout '$DEFAULT_BRANCH'. Working tree dirty or branch missing."
+            exit 2
+        fi
 
         # Remove worktree first so branch is not checked out
         git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true

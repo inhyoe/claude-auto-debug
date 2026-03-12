@@ -15,7 +15,14 @@ Claude Code CLI를 사용한 24/7 자동 코드 품질 개선 파이프라인.
 
 ## 설치
 
-대상 프로젝트 디렉토리에서 실행하면 끝입니다:
+대상 프로젝트 디렉토리에서 한 줄로 설치:
+
+```bash
+cd /path/to/my-project
+bash <(curl -fsSL https://raw.githubusercontent.com/inhyoe/claude-auto-debug/main/setup.sh)
+```
+
+또는 수동 설치:
 
 ```bash
 cd /path/to/my-project

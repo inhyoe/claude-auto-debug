@@ -108,18 +108,7 @@ cleanup() {
 detect_default_branch() {
     cd "$PROJECT_DIR"
 
-    # If DEFAULT_BRANCH was set via config, use it directly
-    if [[ -n "${DEFAULT_BRANCH:-}" ]]; then
-        if [[ "$HAS_REMOTE" = true ]] && git rev-parse --verify "origin/$DEFAULT_BRANCH" &>/dev/null 2>&1; then
-            REMOTE_REF="origin/$DEFAULT_BRANCH"
-        else
-            REMOTE_REF="$DEFAULT_BRANCH"
-        fi
-        log "Using configured DEFAULT_BRANCH=$DEFAULT_BRANCH"
-        return
-    fi
-
-    # Check if remote 'origin' exists
+    # Check if remote 'origin' exists (needed before config override check)
     if ! git remote get-url origin &>/dev/null; then
         log "Warning: No 'origin' remote. Using local branches only."
         DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
@@ -129,6 +118,27 @@ detect_default_branch() {
     fi
 
     HAS_REMOTE=true
+
+    # If DEFAULT_BRANCH was set via config, use it with remote tracking
+    if [[ -n "${DEFAULT_BRANCH:-}" ]]; then
+        REMOTE_REF="origin/$DEFAULT_BRANCH"
+        # Fetch to ensure remote-tracking ref exists locally
+        git fetch origin "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null || true
+        # Create local branch from remote if missing
+        if ! git rev-parse --verify "refs/heads/$DEFAULT_BRANCH" &>/dev/null; then
+            local cfg_remote_sha
+            cfg_remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
+            if [[ -n "$cfg_remote_sha" ]]; then
+                git branch "$DEFAULT_BRANCH" "$cfg_remote_sha" 2>/dev/null || true
+                log "Created local branch '$DEFAULT_BRANCH' from $REMOTE_REF"
+            else
+                err "Configured DEFAULT_BRANCH='$DEFAULT_BRANCH' not found on remote 'origin'."
+                exit 1
+            fi
+        fi
+        log "Using configured DEFAULT_BRANCH=$DEFAULT_BRANCH"
+        return
+    fi
 
     # Try remote HEAD via local symbolic ref
     local ref
@@ -374,10 +384,11 @@ validate() {
         if [[ $health_rc -eq 0 ]]; then
             log "Repo health check PASSED. Marking SHA as inspected."
             echo "$CURRENT_SHA" > "$STATE_FILE"
+            exit 0
         else
             log "Warning: Repo health check FAILED (exit $health_rc). SHA not marked — will retry next run."
+            exit 1
         fi
-        exit 0
     fi
 
     if [[ "$changed_files" -gt "$MAX_FILES" ]]; then

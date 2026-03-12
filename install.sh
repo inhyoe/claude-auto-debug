@@ -4,9 +4,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # install.sh — claude-auto-debug 설치
 # 사용법:
-#   cd /path/to/my-project && bash install.sh
-#   bash install.sh --interval 12h --max-files 5
-#   bash <(curl ...) --interval 1d --allowed-tools "Read,Grep"
+#   cd /path/to/my-project && bash install.sh          # 대화형 (기본)
+#   bash install.sh -y                                  # 자동 (기본값 사용)
+#   bash install.sh --interval 12h --max-files 5        # 특정 옵션 지정
+#   bash <(curl ...) -y                                 # 원라인 자동 설치
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,10 +27,15 @@ OPT_MAX_FILES=""
 OPT_ALLOWED_TOOLS=""
 OPT_VALIDATION=""
 OPT_LOG_RETENTION=""
+OPT_YES=false
 
 show_help() {
     cat <<'HELPEOF'
 Usage: install.sh [OPTIONS] [PROJECT_DIR]
+
+Modes:
+  (default)              대화형 설치 — 각 옵션을 확인/수정
+  -y, --yes              자동 설치 — 기본값 또는 지정 옵션 사용
 
 Options:
   --interval TIME        실행 주기 (기본: 6h). 예: 30m, 1h, 6h, 1d
@@ -40,15 +46,16 @@ Options:
   -h, --help             도움말
 
 Examples:
-  cd ~/my-project && bash install.sh
-  bash install.sh --interval 12h --max-files 5
-  bash install.sh --interval 1d ~/my-project
+  cd ~/my-project && bash install.sh           # 대화형
+  cd ~/my-project && bash install.sh -y        # 자동
+  bash install.sh --interval 12h ~/my-project  # 특정 옵션
 HELPEOF
     exit 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -y|--yes)        OPT_YES=true; shift ;;
         --interval)      OPT_INTERVAL="$2"; shift 2 ;;
         --max-files)     OPT_MAX_FILES="$2"; shift 2 ;;
         --allowed-tools) OPT_ALLOWED_TOOLS="$2"; shift 2 ;;
@@ -60,14 +67,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ── PROJECT_DIR: 인자 > 현재 디렉토리 ──────────────────────────────────────
+# ── PROJECT_DIR ─────────────────────────────────────────────────────────────
 if [[ -n "$OPT_PROJECT" ]]; then
     PROJECT_DIR="$(cd "$OPT_PROJECT" && pwd)"
 else
     PROJECT_DIR="$(pwd)"
 fi
 
-# claude-auto-debug 자체를 대상으로 설치하는 실수 방지
 if [[ "$PROJECT_DIR" = "$SCRIPT_DIR" ]]; then
     echo "ERROR: 대상 프로젝트 디렉토리에서 실행하세요." >&2
     echo "  cd /path/to/your-project" >&2
@@ -75,22 +81,18 @@ if [[ "$PROJECT_DIR" = "$SCRIPT_DIR" ]]; then
     exit 1
 fi
 
-# git repo인지 확인
 if ! git -C "$PROJECT_DIR" rev-parse --git-dir &>/dev/null; then
     echo "ERROR: $PROJECT_DIR 는 git 저장소가 아닙니다." >&2
     exit 1
 fi
 
-# ── VALIDATION_CMD 자동 감지 ────────────────────────────────────────────────
+# ── 자동 감지 ───────────────────────────────────────────────────────────────
 detect_validation_cmd() {
     local dir="$1"
-
-    # 프로젝트별 테스트 스크립트 우선
     if [[ -f "$dir/scripts/run-tests.sh" ]]; then
         echo "bash scripts/run-tests.sh"
     elif [[ -f "$dir/Makefile" ]] && grep -q '^test:' "$dir/Makefile" 2>/dev/null; then
         echo "make test"
-    # 언어/프레임워크별 감지
     elif [[ -f "$dir/pubspec.yaml" ]]; then
         echo "dart analyze && flutter test"
     elif [[ -f "$dir/package.json" ]] && grep -q '"test"' "$dir/package.json" 2>/dev/null; then
@@ -102,23 +104,61 @@ detect_validation_cmd() {
     elif [[ -f "$dir/go.mod" ]]; then
         echo "go test ./..."
     else
-        # 폴백: 정적 분석만
-        echo "echo 'No validation command detected — skipping validation'"
+        echo "echo 'No validation command detected — skipping'"
     fi
 }
 
-# CLI 옵션 우선, 없으면 자동 감지
-if [[ -n "$OPT_VALIDATION" ]]; then
-    VALIDATION_CMD="$OPT_VALIDATION"
-else
-    VALIDATION_CMD="$(detect_validation_cmd "$PROJECT_DIR")"
-fi
-
-# 나머지 옵션 기본값
+# 기본값 결정: CLI 옵션 > 자동 감지/하드코딩 기본값
+VALIDATION_CMD="${OPT_VALIDATION:-$(detect_validation_cmd "$PROJECT_DIR")}"
 INTERVAL="${OPT_INTERVAL:-6h}"
 MAX_FILES="${OPT_MAX_FILES:-3}"
 ALLOWED_TOOLS="${OPT_ALLOWED_TOOLS:-Read,Edit,Write,Glob,Grep,Bash}"
 LOG_RETENTION_DAYS="${OPT_LOG_RETENTION:-30}"
+
+# ── 대화형 설치 ─────────────────────────────────────────────────────────────
+# 사용자에게 입력 받아서 기본값을 대체. Enter만 치면 기본값 유지.
+prompt_value() {
+    local label="$1" default="$2" result
+    read -rp "  ${label} [${default}]: " result </dev/tty
+    echo "${result:-$default}"
+}
+
+if [[ "$OPT_YES" = false ]] && [[ -t 0 || -e /dev/tty ]]; then
+    echo ""
+    echo "╔══════════════════════════════════════════╗"
+    echo "║   claude-auto-debug installer            ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+    echo "  Project:    $PROJECT_DIR"
+    echo "  Validation: $VALIDATION_CMD (auto-detected)"
+    echo ""
+
+    read -rp "설정을 변경하시겠습니까? [y/N]: " configure </dev/tty
+    if [[ "$configure" =~ ^[yY] ]]; then
+        echo ""
+        INTERVAL="$(prompt_value "실행 주기 (예: 30m, 1h, 6h, 1d)" "$INTERVAL")"
+        MAX_FILES="$(prompt_value "1회 최대 수정 파일 수" "$MAX_FILES")"
+        VALIDATION_CMD="$(prompt_value "검증 명령어" "$VALIDATION_CMD")"
+        ALLOWED_TOOLS="$(prompt_value "Claude 허용 도구" "$ALLOWED_TOOLS")"
+        LOG_RETENTION_DAYS="$(prompt_value "로그 보존 기간 (일)" "$LOG_RETENTION_DAYS")"
+    fi
+
+    echo ""
+    echo "── 설치 요약 ──────────────────────────────"
+    echo "  Project:       $PROJECT_DIR"
+    echo "  Validation:    $VALIDATION_CMD"
+    echo "  Interval:      $INTERVAL"
+    echo "  Max files:     $MAX_FILES"
+    echo "  Allowed tools: $ALLOWED_TOOLS"
+    echo "  Log retention: ${LOG_RETENTION_DAYS}d"
+    echo ""
+
+    read -rp "진행하시겠습니까? [Y/n]: " confirm </dev/tty
+    if [[ "$confirm" =~ ^[nN] ]]; then
+        echo "설치를 취소했습니다."
+        exit 0
+    fi
+fi
 
 # ── Read helper ─────────────────────────────────────────────────────────────
 read_config_value() {
@@ -135,25 +175,31 @@ read_config_value() {
     printf '%s\n' "$val"
 }
 
-# ── 설치 시작 ───────────────────────────────────────────────────────────────
+# ── 설치 실행 ───────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
 
-echo "Installing claude-auto-debug ..."
-echo "  Target project: $PROJECT_DIR"
-echo "  Detected validation: $VALIDATION_CMD"
 echo ""
+echo "Installing ..."
 
 # bin/ + templates/ 복사
 cp -r "${SCRIPT_DIR}/bin" "$INSTALL_DIR/"
 cp -r "${SCRIPT_DIR}/templates" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/auto-debug.sh"
 
-# config.env 생성 (최초) 또는 PROJECT_DIR 업데이트
+# config.env 생성 또는 업데이트
+update_config() {
+    local key="$1" val="$2"
+    if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
+    else
+        echo "${key}=${val}" >> "$CONFIG_FILE"
+    fi
+}
+
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    # 새 config 생성 — 자동 감지 값 적용
     cat > "$CONFIG_FILE" << ENVEOF
-# Claude Auto-Debug — auto-generated config
-# Re-run install.sh [--option value] to update.
+# Claude Auto-Debug — config
+# Re-run install.sh to update.
 
 PROJECT_DIR=${PROJECT_DIR}
 VALIDATION_CMD="${VALIDATION_CMD}"
@@ -162,28 +208,18 @@ MAX_FILES=${MAX_FILES}
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
 INTERVAL=${INTERVAL}
 ENVEOF
-    echo "Created config: $CONFIG_FILE"
+    echo "  Config created: $CONFIG_FILE"
 else
-    # config 존재 — 지정된 옵션만 업데이트
-    update_config() {
-        local key="$1" val="$2"
-        if grep -q "^${key}=" "$CONFIG_FILE"; then
-            sed -i "s|^${key}=.*|${key}=${val}|" "$CONFIG_FILE"
-        else
-            echo "${key}=${val}" >> "$CONFIG_FILE"
-        fi
-    }
     update_config "PROJECT_DIR" "$PROJECT_DIR"
     update_config "VALIDATION_CMD" "\"$VALIDATION_CMD\""
-    [[ -n "$OPT_INTERVAL" ]]      && update_config "INTERVAL" "$INTERVAL"
-    [[ -n "$OPT_MAX_FILES" ]]     && update_config "MAX_FILES" "$MAX_FILES"
-    [[ -n "$OPT_ALLOWED_TOOLS" ]] && update_config "ALLOWED_TOOLS" "$ALLOWED_TOOLS"
-    [[ -n "$OPT_LOG_RETENTION" ]] && update_config "LOG_RETENTION_DAYS" "$LOG_RETENTION_DAYS"
-    echo "Updated config: $CONFIG_FILE"
+    update_config "INTERVAL" "$INTERVAL"
+    update_config "MAX_FILES" "$MAX_FILES"
+    update_config "ALLOWED_TOOLS" "$ALLOWED_TOOLS"
+    update_config "LOG_RETENTION_DAYS" "$LOG_RETENTION_DAYS"
+    echo "  Config updated: $CONFIG_FILE"
 fi
 
-# systemd timer 생성 (INTERVAL은 이미 옵션/기본값에서 설정됨)
-
+# systemd timer
 rendered_timer="$(mktemp)"
 trap 'rm -f "$rendered_timer"' EXIT
 sed "s/%%INTERVAL%%/${INTERVAL}/g" "$TIMER_TEMPLATE" > "$rendered_timer"
@@ -200,7 +236,6 @@ echo "  Project:      $PROJECT_DIR"
 echo "  Validation:   $VALIDATION_CMD"
 echo "  Interval:     every $INTERVAL"
 echo "  Max files:    $MAX_FILES"
-echo "  Allowed tools: $ALLOWED_TOOLS"
 echo "  Config:       $CONFIG_FILE"
 echo "  Logs:         journalctl --user -u auto-debug.service"
 echo ""

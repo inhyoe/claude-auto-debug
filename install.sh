@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# install.sh — claude-auto-debug 설치
+# install.sh — claude-auto-debug 대화형 설치
 # 사용법:
-#   cd /path/to/my-project && bash install.sh          # 대화형 (기본)
-#   bash install.sh -y                                  # 자동 (기본값 사용)
-#   bash install.sh --interval 12h --max-files 5        # 특정 옵션 지정
+#   cd /path/to/my-project && bash install.sh          # 대화형 설치
+#   bash install.sh --interval 12h --max-files 5        # 기본값 지정 후 대화형 확인
 #   원라인 설치는 setup.sh 사용 (README.md 참조)
+# NOTE: 반드시 대화형(TTY)으로 실행해야 합니다. 비대화형 모드는 지원하지 않습니다.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,28 +27,23 @@ OPT_MAX_FILES=""
 OPT_ALLOWED_TOOLS=""
 OPT_VALIDATION=""
 OPT_LOG_RETENTION=""
-OPT_YES=false
-
 show_help() {
     cat <<'HELPEOF'
 Usage: install.sh [OPTIONS] [PROJECT_DIR]
 
-Modes:
-  (default)              대화형 설치 — 각 옵션을 확인/수정
-  -y, --yes              자동 설치 — 기본값 또는 지정 옵션 사용
+대화형 설치 전용 — TTY 필수. 각 옵션을 확인/수정할 수 있습니다.
 
 Options:
-  --interval TIME        실행 주기 (기본: 6h). 예: 30m, 1h, 6h, 1d
-  --max-files N          1회 최대 수정 파일 수 (기본: 3)
-  --allowed-tools LIST   Claude 허용 도구 (기본: Read,Edit,Write,Glob,Grep,Bash)
-  --validation CMD       검증 명령어 (기본: 자동 감지)
-  --log-retention DAYS   로그 보존 기간 (기본: 30)
+  --interval TIME        실행 주기 기본값 (기본: 6h). 예: 30m, 1h, 6h, 1d
+  --max-files N          1회 최대 수정 파일 수 기본값 (기본: 3)
+  --allowed-tools LIST   Claude 허용 도구 기본값 (기본: Read,Edit,Write,Glob,Grep,Bash)
+  --validation CMD       검증 명령어 기본값 (기본: 자동 감지)
+  --log-retention DAYS   로그 보존 기간 기본값 (기본: 30)
   -h, --help             도움말
 
 Examples:
-  cd ~/my-project && bash install.sh           # 대화형
-  cd ~/my-project && bash install.sh -y        # 자동
-  bash install.sh --interval 12h ~/my-project  # 특정 옵션
+  cd ~/my-project && bash install.sh           # 대화형 설치
+  bash install.sh --interval 12h ~/my-project  # 기본값 지정 후 대화형 확인
 HELPEOF
     exit 0
 }
@@ -62,7 +57,6 @@ require_arg() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -y|--yes)        OPT_YES=true; shift ;;
         --interval)      require_arg "$@"; OPT_INTERVAL="$2"; shift 2 ;;
         --max-files)     require_arg "$@"; OPT_MAX_FILES="$2"; shift 2 ;;
         --allowed-tools) require_arg "$@"; OPT_ALLOWED_TOOLS="$2"; shift 2 ;;
@@ -154,45 +148,47 @@ prompt_value() {
     echo "${result:-$default}"
 }
 
-can_prompt() {
-    [[ "$OPT_YES" = false ]] && { [[ -t 0 ]] || { [[ -e /dev/tty ]] && echo test < /dev/tty >/dev/null 2>&1; }; }
-}
+# ── TTY 필수 검사 ─────────────────────────────────────────────────────────
+# 대화형 전용: TTY가 없으면 설치를 중단합니다.
+if ! { [[ -t 0 ]] || { [[ -e /dev/tty ]] && echo test < /dev/tty >/dev/null 2>&1; }; }; then
+    echo "ERROR: 대화형 TTY가 필요합니다. 파이프나 비대화형 환경에서는 실행할 수 없습니다." >&2
+    echo "  터미널에서 직접 실행하세요: bash install.sh" >&2
+    exit 1
+fi
 
-if can_prompt; then
-    echo ""
-    echo "╔══════════════════════════════════════════╗"
-    echo "║   claude-auto-debug installer            ║"
-    echo "╚══════════════════════════════════════════╝"
-    echo ""
-    echo "  Project:    $PROJECT_DIR"
-    echo "  Validation: $VALIDATION_CMD (auto-detected)"
-    echo ""
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║   claude-auto-debug installer            ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+echo "  Project:    $PROJECT_DIR"
+echo "  Validation: $VALIDATION_CMD (auto-detected)"
+echo ""
 
-    read -rp "설정을 변경하시겠습니까? [y/N]: " configure </dev/tty
-    if [[ "$configure" =~ ^[yY] ]]; then
-        echo ""
-        INTERVAL="$(prompt_value "실행 주기 (예: 30m, 1h, 6h, 1d)" "$INTERVAL")"
-        MAX_FILES="$(prompt_value "1회 최대 수정 파일 수" "$MAX_FILES")"
-        VALIDATION_CMD="$(prompt_value "검증 명령어" "$VALIDATION_CMD")"
-        ALLOWED_TOOLS="$(prompt_value "Claude 허용 도구" "$ALLOWED_TOOLS")"
-        LOG_RETENTION_DAYS="$(prompt_value "로그 보존 기간 (일)" "$LOG_RETENTION_DAYS")"
-    fi
-
+read -rp "설정을 변경하시겠습니까? [y/N]: " configure </dev/tty
+if [[ "$configure" =~ ^[yY] ]]; then
     echo ""
-    echo "── 설치 요약 ──────────────────────────────"
-    echo "  Project:       $PROJECT_DIR"
-    echo "  Validation:    $VALIDATION_CMD"
-    echo "  Interval:      $INTERVAL"
-    echo "  Max files:     $MAX_FILES"
-    echo "  Allowed tools: $ALLOWED_TOOLS"
-    echo "  Log retention: ${LOG_RETENTION_DAYS}d"
-    echo ""
+    INTERVAL="$(prompt_value "실행 주기 (예: 30m, 1h, 6h, 1d)" "$INTERVAL")"
+    MAX_FILES="$(prompt_value "1회 최대 수정 파일 수" "$MAX_FILES")"
+    VALIDATION_CMD="$(prompt_value "검증 명령어" "$VALIDATION_CMD")"
+    ALLOWED_TOOLS="$(prompt_value "Claude 허용 도구" "$ALLOWED_TOOLS")"
+    LOG_RETENTION_DAYS="$(prompt_value "로그 보존 기간 (일)" "$LOG_RETENTION_DAYS")"
+fi
 
-    read -rp "진행하시겠습니까? [Y/n]: " confirm </dev/tty
-    if [[ "$confirm" =~ ^[nN] ]]; then
-        echo "설치를 취소했습니다."
-        exit 0
-    fi
+echo ""
+echo "── 설치 요약 ──────────────────────────────"
+echo "  Project:       $PROJECT_DIR"
+echo "  Validation:    $VALIDATION_CMD"
+echo "  Interval:      $INTERVAL"
+echo "  Max files:     $MAX_FILES"
+echo "  Allowed tools: $ALLOWED_TOOLS"
+echo "  Log retention: ${LOG_RETENTION_DAYS}d"
+echo ""
+
+read -rp "진행하시겠습니까? [Y/n]: " confirm </dev/tty
+if [[ "$confirm" =~ ^[nN] ]]; then
+    echo "설치를 취소했습니다."
+    exit 0
 fi
 
 # ── 입력 검증 (파일 생성 전에 실행) ──────────────────────────────────────────

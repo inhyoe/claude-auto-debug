@@ -99,6 +99,14 @@ cleanup() {
         git -C "$proj" branch -D "$BRANCH_NAME" 2>/dev/null || true
     fi
 
+    # Run log retention cleanup on every exit (including early exits from check_dedup/validate)
+    if [[ -n "${LOG_DIR:-}" ]] && [[ -d "$LOG_DIR" ]]; then
+        find "$LOG_DIR" -maxdepth 1 -name "*.log" \
+            -mtime +"${LOG_RETENTION_DAYS:-30}" -delete 2>/dev/null || true
+        find "${DEAD_LETTER_DIR:-$LOG_DIR}" -maxdepth 1 \( -name "*.log" -o -name "*.patch" \) \
+            -mtime +"${LOG_RETENTION_DAYS:-30}" -delete 2>/dev/null || true
+    fi
+
     return "$exit_code"
 }
 
@@ -108,12 +116,20 @@ cleanup() {
 detect_default_branch() {
     cd "$PROJECT_DIR"
 
-    # Check if remote 'origin' exists (needed before config override check)
+    # Check if remote 'origin' exists
     if ! git remote get-url origin &>/dev/null; then
         log "Warning: No 'origin' remote. Using local branches only."
-        DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-        REMOTE_REF="$DEFAULT_BRANCH"
         HAS_REMOTE=false
+        # Honor configured DEFAULT_BRANCH for local-only repos
+        if [[ -z "${DEFAULT_BRANCH:-}" ]]; then
+            DEFAULT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        fi
+        # Verify the configured/detected branch exists locally
+        if ! git rev-parse --verify "refs/heads/$DEFAULT_BRANCH" &>/dev/null; then
+            err "DEFAULT_BRANCH='$DEFAULT_BRANCH' does not exist locally."
+            exit 1
+        fi
+        REMOTE_REF="$DEFAULT_BRANCH"
         return
     fi
 
@@ -233,7 +249,7 @@ single_instance() {
         err "Lock file is a symlink (possible attack): $LOCK_FILE"
         exit 1
     fi
-    eval "exec ${LOCK_FD}>'$LOCK_FILE'"
+    exec {LOCK_FD}>"$LOCK_FILE"
     if ! flock -n "$LOCK_FD"; then
         log "Another instance is already running. Exiting."
         exit 0
@@ -492,17 +508,6 @@ merge_or_discard() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_old_logs — remove logs older than LOG_RETENTION_DAYS
-# ---------------------------------------------------------------------------
-cleanup_old_logs() {
-    log "Cleaning up logs older than ${LOG_RETENTION_DAYS} days ..."
-    find "$LOG_DIR" -maxdepth 1 -name "*.log" \
-        -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
-    find "$DEAD_LETTER_DIR" -maxdepth 1 \( -name "*.log" -o -name "*.patch" \) \
-        -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
-}
-
-# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
@@ -516,7 +521,6 @@ main() {
     run_claude
     validate
     merge_or_discard
-    cleanup_old_logs
 
     log "=== claude-auto-debug finished ==="
     log "  Started  : $START_TS"

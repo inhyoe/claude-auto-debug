@@ -225,7 +225,13 @@ check_dedup() {
             remote_sha=$(git rev-parse "$REMOTE_REF" 2>/dev/null || echo "")
             if [[ -n "$remote_sha" ]] && [[ "$local_sha" != "$remote_sha" ]]; then
                 if git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
-                    git update-ref "refs/heads/$DEFAULT_BRANCH" "$remote_sha" "$local_sha"
+                    local current_branch
+                    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+                    if [[ "$current_branch" = "$DEFAULT_BRANCH" ]]; then
+                        git merge --ff-only "$REMOTE_REF" 2>/dev/null || true
+                    else
+                        git update-ref "refs/heads/$DEFAULT_BRANCH" "$remote_sha" "$local_sha"
+                    fi
                     log "Fast-forwarded $DEFAULT_BRANCH to upstream (${remote_sha:0:8})"
                 fi
             fi
@@ -310,9 +316,12 @@ run_claude() {
 validate() {
     cd "$WORKTREE_PATH"
 
-    # Compare against worktree base (DEFAULT_BRANCH) — catches both committed and uncommitted
+    # Compare against worktree base (DEFAULT_BRANCH) — catches committed, uncommitted, and untracked
     local changed_files
-    changed_files=$(git -C "$WORKTREE_PATH" diff "$DEFAULT_BRANCH" --name-only | wc -l)
+    changed_files=$(cd "$WORKTREE_PATH" && {
+        git diff "$DEFAULT_BRANCH" --name-only
+        git ls-files --others --exclude-standard
+    } | sort -u | wc -l)
 
     if [[ "$changed_files" -eq 0 ]]; then
         log "No changes were made by Claude — no issues found."
@@ -337,12 +346,20 @@ validate() {
         # Ensure all changes are committed (prompt tells Claude NOT to commit)
         if [[ -n "$(git -C "$WORKTREE_PATH" status --porcelain)" ]]; then
             git -C "$WORKTREE_PATH" add -A
+            set +e
             git -C "$WORKTREE_PATH" \
                 -c user.name="Claude Auto-Debug" \
                 -c user.email="noreply@auto-debug" \
                 commit -m "fix(auto-debug): automated code quality fix
 
 Co-Authored-By: Claude Auto-Debug <noreply@anthropic.com>"
+            local commit_rc=$?
+            set -e
+            if [[ $commit_rc -ne 0 ]]; then
+                err "Commit failed (exit $commit_rc). Changes preserved for debugging."
+                VALIDATION_EXIT_CODE=1
+                return
+            fi
         fi
     else
         log "Validation FAILED (exit $VALIDATION_EXIT_CODE)."

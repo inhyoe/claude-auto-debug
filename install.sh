@@ -226,8 +226,9 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     write_config
     echo "  Config created: $CONFIG_FILE"
 else
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
     write_config
-    echo "  Config updated: $CONFIG_FILE"
+    echo "  Config updated: $CONFIG_FILE (backup: ${CONFIG_FILE}.bak)"
 fi
 
 # systemd timer (INTERVAL already validated above — safe to substitute)

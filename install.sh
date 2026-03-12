@@ -202,6 +202,16 @@ if ! [[ "$INTERVAL" =~ ^[0-9]+[smhd]?$ ]]; then
     exit 1
 fi
 
+if ! [[ "$MAX_FILES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: MAX_FILES must be a positive integer, got: '$MAX_FILES'" >&2
+    exit 1
+fi
+
+if ! [[ "$LOG_RETENTION_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: LOG_RETENTION_DAYS must be a positive integer, got: '$LOG_RETENTION_DAYS'" >&2
+    exit 1
+fi
+
 # ── 설치 실행 ───────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$SYSTEMD_USER_DIR"
 

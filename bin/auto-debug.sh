@@ -205,6 +205,16 @@ setup() {
 
     ORIGINAL_PROJECT_DIR="$PROJECT_DIR"
 
+    # Validate numeric config values
+    if ! [[ "$MAX_FILES" =~ ^[1-9][0-9]*$ ]]; then
+        err "MAX_FILES must be a positive integer, got: '$MAX_FILES'"
+        exit 1
+    fi
+    if ! [[ "$LOG_RETENTION_DAYS" =~ ^[1-9][0-9]*$ ]]; then
+        err "LOG_RETENTION_DAYS must be a positive integer, got: '$LOG_RETENTION_DAYS'"
+        exit 1
+    fi
+
     mkdir -p "$LOG_DIR" "$DEAD_LETTER_DIR" "$(dirname "$STATE_FILE")"
 
     # Verify WORKTREE_BASE ownership (mitigate pre-created directory attacks)

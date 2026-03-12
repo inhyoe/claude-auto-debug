@@ -2,6 +2,7 @@
 Description=Claude Auto-Debug Timer
 
 [Timer]
+OnBootSec=5min
 OnUnitActiveSec=%%INTERVAL%%
 Persistent=true
 Unit=auto-debug.service

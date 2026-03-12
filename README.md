@@ -15,18 +15,37 @@ Claude Code CLI를 사용한 24/7 자동 코드 품질 개선 파이프라인.
 
 ## 설치
 
+대상 프로젝트 디렉토리에서 실행하면 끝입니다:
+
 ```bash
-git clone https://github.com/<your-username>/claude-auto-debug.git
-cd claude-auto-debug
-bash install.sh
+cd /path/to/my-project
+git clone https://github.com/inhyoe/claude-auto-debug.git /tmp/claude-auto-debug
+bash /tmp/claude-auto-debug/install.sh
 ```
 
-install.sh가 수행하는 작업:
-1. `~/.local/bin/claude-auto-debug/`에 스크립트 복사
-2. `~/.config/claude-auto-debug/config.env` 생성 (최초 1회)
-3. systemd user timer 등록 및 활성화
+install.sh가 자동으로:
+1. 현재 디렉토리를 `PROJECT_DIR`로 설정
+2. 프로젝트 타입에 맞는 검증 명령어 자동 감지
+3. `~/.local/bin/claude-auto-debug/`에 스크립트 복사
+4. `~/.config/claude-auto-debug/config.env` 생성
+5. systemd user timer 등록 및 활성화
+
+### 자동 감지되는 검증 명령어
+
+| 프로젝트 타입 | 감지 기준 | 검증 명령어 |
+|-------------|----------|------------|
+| 커스텀 스크립트 | `scripts/run-tests.sh` 존재 | `bash scripts/run-tests.sh` |
+| Makefile | `test:` 타겟 존재 | `make test` |
+| Flutter/Dart | `pubspec.yaml` 존재 | `dart analyze && flutter test` |
+| Node.js | `package.json`에 `test` 스크립트 | `npm test` |
+| Python | `pyproject.toml`/`pytest.ini` 존재 | `pytest` |
+| Rust | `Cargo.toml` 존재 | `cargo test` |
+| Go | `go.mod` 존재 | `go test ./...` |
 
 ## 설정
+
+설정 파일은 `~/.config/claude-auto-debug/config.env`에 자동 생성됩니다.
+대부분의 경우 수정할 필요 없지만, 필요하면:
 
 ```bash
 nano ~/.config/claude-auto-debug/config.env
@@ -34,14 +53,14 @@ nano ~/.config/claude-auto-debug/config.env
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `PROJECT_DIR` | (필수) | 대상 프로젝트 절대 경로 |
-| `VALIDATION_CMD` | `bash scripts/run-tests.sh` | 변경 후 실행할 검증 명령어 |
+| `PROJECT_DIR` | (자동 감지) | 대상 프로젝트 절대 경로 |
+| `VALIDATION_CMD` | (자동 감지) | 변경 후 실행할 검증 명령어 |
 | `ALLOWED_TOOLS` | `Read,Edit,Write,Glob,Grep,Bash` | Claude에 허용할 도구 |
 | `MAX_FILES` | `3` | 1회 최대 수정 파일 수 |
 | `LOG_RETENTION_DAYS` | `30` | 로그 보존 기간 (일) |
 | `INTERVAL` | `6h` | 실행 주기 (systemd timer) |
 
-**주기 변경 시**: config.env의 `INTERVAL`을 수정한 후 `bash install.sh`를 다시 실행하세요.
+**다른 프로젝트로 변경**: 해당 프로젝트에서 `install.sh`를 다시 실행하세요.
 
 ## 24/7 동작
 
